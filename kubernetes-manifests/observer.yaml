@@ -1,0 +1,86 @@
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: observer
+  labels:
+    app: observer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observer
+  namespace: observer
+  labels:
+    app: observer
+spec:
+  selector:
+    matchLabels:
+      app: observer
+  template:
+    metadata:
+      labels:
+        app: observer
+    spec:
+      containers:
+        - name: server
+          image: smorenburg/observer
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 200m
+              memory: 100Mi
+            limits:
+              cpu: 200m
+              memory: 100Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: observer
+  namespace: hello
+  labels:
+    app: observer
+spec:
+  type: ClusterIP
+  selector:
+    app: observer
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: hello
+  namespace: hello
+  labels:
+    app: hello
+spec:
+  domains:
+    - observer.robino.io
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: observer
+  namespace: observer
+  annotations:
+    networking.gke.io/managed-certificates: observer
+    kubernetes.io/ingress.class: gce
+    networking.gke.io/v1beta1.FrontendConfig: observer
+spec:
+  defaultBackend:
+    service:
+      name: observer
+      port:
+        number: 80
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: observer
+  namespace: observer
+spec:
+  redirectToHttps:
+    enabled: true
