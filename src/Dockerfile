@@ -13,4 +13,5 @@ WORKDIR /src
 COPY --from=builder /src/observer .
 
 EXPOSE 8080
+EXPOSE 9090
 ENTRYPOINT ["/src/observer"]

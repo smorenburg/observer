@@ -16,7 +16,6 @@ import (
 var logFatal = log.Fatal
 var logPrintf = log.Printf
 var sleep = time.Sleep
-var httpListenAndServe = http.ListenAndServe
 var serviceName = "observer"
 
 var prometheusHandler = func() http.Handler {
@@ -44,20 +43,26 @@ func main() {
 	if len(os.Getenv("SERVICE_NAME")) > 0 {
 		serviceName = os.Getenv("SERVICE_NAME")
 	}
-	RunServer()
+	runServer()
 }
 
-func RunServer() {
+func runServer() {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", IndexServer)
-	mux.HandleFunc("/random-delay", RandomDelayServer)
-	mux.HandleFunc("/random-error", RandomErrorServer)
-	mux.Handle("/metrics", prometheusHandler())
+	mux.HandleFunc("/", indexServer)
+	mux.HandleFunc("/random-delay", randomDelayServer)
+	mux.HandleFunc("/random-error", randomErrorServer)
 
-	logFatal("ListenAndServe: ", httpListenAndServe(":8080", mux))
+	muxMetrics := http.NewServeMux()
+	muxMetrics.Handle("/metrics", prometheusHandler())
+
+	go func() {
+		logFatal("ListenAndServe: ", http.ListenAndServe(":9090", muxMetrics))
+	}()
+
+	logFatal("ListenAndServe: ", http.ListenAndServe(":8080", mux))
 }
 
-func IndexServer(w http.ResponseWriter, req *http.Request) {
+func indexServer(w http.ResponseWriter, req *http.Request) {
 	code := http.StatusOK
 	start := time.Now()
 	defer func() { recordMetrics(start, req, code) }()
@@ -76,7 +81,7 @@ func IndexServer(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func RandomDelayServer(w http.ResponseWriter, req *http.Request) {
+func randomDelayServer(w http.ResponseWriter, req *http.Request) {
 	code := http.StatusOK
 	start := time.Now()
 	defer func() { recordMetrics(start, req, code) }()
@@ -100,7 +105,7 @@ func RandomDelayServer(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func RandomErrorServer(w http.ResponseWriter, req *http.Request) {
+func randomErrorServer(w http.ResponseWriter, req *http.Request) {
 	code := http.StatusOK
 	start := time.Now()
 	defer func() { recordMetrics(start, req, code) }()
