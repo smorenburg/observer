@@ -104,7 +104,7 @@ module "kubernetes" {
   project_id            = var.project_id
   name                  = "cluster-01"
   location              = "europe-west1-b"
-  node_locations        = ["europe-west1-c", "europe-west1-d"]
+  node_locations        = ["europe-west1-c"]
   network               = module.network.vpc_id
   subnetwork            = "nodes"
   service_account_roles = ["roles/compute.securityAdmin"]
@@ -134,7 +134,7 @@ module "kubernetes" {
 
       node_config = {
         preemptible  = true
-        machine_type = "e2-medium"
+        machine_type = "e2-small"
         tags         = ["iap"]
       }
     }
