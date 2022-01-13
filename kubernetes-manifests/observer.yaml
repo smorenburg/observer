@@ -37,11 +37,35 @@ spec:
               cpu: 200m
               memory: 100Mi
 ---
+apiVersion: autoscaling/v2beta1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: observer
+  namespace: observer
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: observer
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        targetAverageUtilization: 80
+    - type: Resource
+      resource:
+        name: memory
+        targetAverageUtilization: 80
+---
 apiVersion: v1
 kind: Service
 metadata:
   name: observer
   namespace: observer
+#  annotations:
+#    cloud.google.com/backend-config: '{"ports": {"http":"observer"}}'
   labels:
     app: observer
 spec:
@@ -49,7 +73,8 @@ spec:
   selector:
     app: observer
   ports:
-    - port: 80
+    - name: http
+      port: 80
       targetPort: 8080
 ---
 apiVersion: networking.gke.io/v1
@@ -68,10 +93,10 @@ kind: Ingress
 metadata:
   name: observer
   namespace: observer
-  annotations:
-    networking.gke.io/managed-certificates: observer
-    kubernetes.io/ingress.class: gce
-    networking.gke.io/v1beta1.FrontendConfig: observer
+#  annotations:
+#    networking.gke.io/managed-certificates: observer
+#    kubernetes.io/ingress.class: gce
+#    networking.gke.io/v1beta1.FrontendConfig: observer
 spec:
   defaultBackend:
     service:
@@ -79,15 +104,24 @@ spec:
       port:
         number: 80
 ---
-apiVersion: networking.gke.io/v1beta1
-kind: FrontendConfig
-metadata:
-  name: observer
-  namespace: observer
-spec:
-  redirectToHttps:
-    enabled: true
----
+#apiVersion: networking.gke.io/v1beta1
+#kind: FrontendConfig
+#metadata:
+#  name: observer
+#  namespace: observer
+#spec:
+#  redirectToHttps:
+#    enabled: true
+#---
+#apiVersion: cloud.google.com/v1
+#kind: BackendConfig
+#metadata:
+#  namespace: observer
+#  name: observer
+#spec:
+#  cdn:
+#    enabled: true
+#---
 apiVersion: monitoring.gke.io/v1alpha1
 kind: PodMonitor
 metadata:
