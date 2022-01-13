@@ -9,9 +9,9 @@ docker push smorenburg/observer:tagname
 
 ```bash
 # 1000 requests
-export HOST=localhost:8080
+export HOST=http://localhost:8080
 for i in {1..1000}; do
-  curl "http://$HOST"
+  curl "$HOST"
 done
 ```
 
@@ -19,7 +19,7 @@ done
 # 30 requests with a random delay in ms.
 export HOST=localhost:8080
 for i in {1..30}; do
-  curl "http://$HOST/random-delay"
+  curl "$HOST/random-delay"
 done
 ```
 
@@ -27,6 +27,6 @@ done
 # 30 requests with a random error.
 export HOST=localhost:8080
 for i in {1..30}; do
-  curl "http://$HOST/random-error"
+  curl "$HOST/random-error"
 done
 ```
