@@ -1,7 +1,7 @@
 FROM golang:1.17.6-alpine as builder
 
 WORKDIR /src
-COPY .. .
+COPY . .
 
 RUN go get -d -v -t
 RUN go build -v -o observer
