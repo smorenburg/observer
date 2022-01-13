@@ -1,8 +1,8 @@
-# demo-app
+# observer
 
 ```bash
-docker build --platform linux/amd64 -t smorenburg/demo-app:tagname .
-docker push smorenburg/demo-app:tagname
+docker build --platform linux/amd64 -t smorenburg/observer:tagname .
+docker push smorenburg/observer:tagname
 ```
 
 ```bash
