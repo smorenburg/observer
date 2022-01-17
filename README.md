@@ -1,4 +1,4 @@
-# observer
+# Observer
 
 https://hub.docker.com/repository/docker/smorenburg/observer
 
@@ -17,16 +17,16 @@ done
 
 ```bash
 # 30 requests with a random delay in ms.
-export HOST=localhost:8080
+export HOST=http://localhost:8080
 for i in {1..30}; do
-  curl "$HOST/random-delay"
+  curl "$HOST/?latency=random"
 done
 ```
 
 ```bash
-# 30 requests with a random error.
-export HOST=localhost:8080
+# 30 requests with a random HTTP server error 500.
+export HOST=http://localhost:8080
 for i in {1..30}; do
-  curl "$HOST/random-error"
+  curl "$HOST/?error=random"
 done
 ```
