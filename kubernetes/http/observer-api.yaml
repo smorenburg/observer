@@ -49,7 +49,7 @@ spec:
     spec:
       containers:
         - name: main
-          image: smorenburg/observer:0.1.7
+          image: smorenburg/observer:0.1.8
           env:
             - name: DB
               value: observer-db-0.observer-db.observer.svc.cluster.local
