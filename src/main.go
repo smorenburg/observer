@@ -171,7 +171,7 @@ func indexEndpoint(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp := "Hello, world!"
+	resp := "Hello, world!\n"
 	_, _ = io.WriteString(w, resp)
 }
 
