@@ -1,26 +1,29 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"io"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-var logFatal = log.Fatal
-var logPrintf = log.Printf
-var sleep = time.Sleep
-var serviceName = "observer"
-
-var prometheusHandler = func() http.Handler {
-	return promhttp.Handler()
-}
+var port string
+var client *mongo.Client
+var svc = "observer"
 
 var (
 	histogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -35,113 +38,236 @@ var (
 	})
 )
 
+type Person struct {
+	ID        primitive.ObjectID `json:"_id,omitempty" bson:"_id,omitempty"`
+	FirstName string             `json:"FirstName,omitempty" bson:"FirstName,omitempty"`
+	LastName  string             `json:"LastName,omitempty" bson:"LastName,omitempty"`
+}
+
 func init() {
+	port = os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("Starting the application on port %s...\n", port)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	host := os.Getenv("DB")
+	if host == "" {
+		host = "localhost"
+	}
+	uri := "mongodb://" + host + ":27017"
+	clientOptions := options.Client().ApplyURI(uri)
+	client, _ = mongo.Connect(ctx, clientOptions)
+	log.Printf("Connecting to the database on %s...\n", host)
+	err := client.Ping(ctx, readpref.Primary())
+	if err != nil {
+		log.Fatalf("error: %s", err)
+	}
+	log.Printf("Successfully connected to the database")
 	prometheus.MustRegister(histogram)
 }
 
 func main() {
-	if len(os.Getenv("SERVICE_NAME")) > 0 {
-		serviceName = os.Getenv("SERVICE_NAME")
-	}
-	runServer()
-}
+	h := mux.NewRouter()
+	h.HandleFunc("/", indexEndpoint).Methods("GET")
+	h.HandleFunc("/health", healthEndpoint).Methods("GET")
+	h.HandleFunc("/person", createPersonEndpoint).Methods("POST")
+	h.HandleFunc("/people", getPeopleEndpoint).Methods("GET")
+	h.HandleFunc("/person/{id}", getPersonEndpoint).Methods("GET")
 
-func runServer() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", indexServer)
-	mux.HandleFunc("/random-delay", randomDelayServer)
-	mux.HandleFunc("/random-error", randomErrorServer)
-
-	muxMetrics := http.NewServeMux()
-	muxMetrics.Handle("/metrics", prometheusHandler())
+	hm := mux.NewRouter()
+	hm.Handle("/metrics", metricsEndpoint()).Methods("GET")
 
 	go func() {
-		logFatal("ListenAndServe: ", http.ListenAndServe(":9090", muxMetrics))
+		log.Fatal(http.ListenAndServe(":9090", hm))
 	}()
-
-	logFatal("ListenAndServe: ", http.ListenAndServe(":8080", mux))
-}
-
-func indexServer(w http.ResponseWriter, req *http.Request) {
-	code := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, req, code) }()
-
-	logPrintf("%s request to %s\n", req.Method, req.RequestURI)
-
-	if req.Method != "GET" {
-		code = http.StatusNotFound
-		http.Error(w, "Method is not supported.", code)
-		return
-	}
-
-	_, err := io.WriteString(w, "Hello, world!\n")
-	if err != nil {
-		return
-	}
-}
-
-func randomDelayServer(w http.ResponseWriter, req *http.Request) {
-	code := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, req, code) }()
-
-	logPrintf("%s request to %s\n", req.Method, req.RequestURI)
-
-	if req.Method != "GET" {
-		code = http.StatusNotFound
-		http.Error(w, "Method is not supported.", code)
-		return
-	}
-
-	rand.Seed(time.Now().UnixNano())
-	n := rand.Intn(1000)
-	sleep(time.Duration(n) * time.Millisecond)
-	msg := fmt.Sprintf("Hello world! Delayed for %d ms.\n", n)
-
-	_, err := io.WriteString(w, msg)
-	if err != nil {
-		return
-	}
-}
-
-func randomErrorServer(w http.ResponseWriter, req *http.Request) {
-	code := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, req, code) }()
-
-	logPrintf("%s request to %s\n", req.Method, req.RequestURI)
-
-	if req.Method != "GET" {
-		code = http.StatusNotFound
-		http.Error(w, "Method is not supported.", code)
-		return
-	}
-
-	rand.Seed(time.Now().UnixNano())
-	n := rand.Intn(10)
-	msg := "Hello, world!\n"
-	if n == 0 {
-		code = http.StatusInternalServerError
-		msg = "error: Something, somewhere, went wrong!\n"
-		logPrintf(msg)
-	}
-
-	w.WriteHeader(code)
-	_, err := io.WriteString(w, msg)
-	if err != nil {
-		return
-	}
+	log.Fatal(http.ListenAndServe(":"+port, h))
 }
 
 func recordMetrics(start time.Time, req *http.Request, code int) {
 	duration := time.Since(start)
 	histogram.With(
 		prometheus.Labels{
-			"service": serviceName,
+			"service": svc,
 			"code":    fmt.Sprintf("%d", code),
 			"method":  req.Method,
 			"path":    req.URL.Path,
 		},
 	).Observe(duration.Seconds())
+}
+
+func latency(l string) {
+	var ms int
+	if l == "random" {
+		rand.Seed(time.Now().UnixNano())
+		ms = rand.Intn(1000)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+	} else {
+		var err error
+		if ms, err = strconv.Atoi(l); err == nil {
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+	}
+	log.Printf("Request delayed for %v ms\n", ms)
+}
+
+func httpError(e string) (int, string) {
+	var c int
+	var m string
+	if e == "random" {
+		// Generate random HTTP server error 500.
+		rand.Seed(time.Now().UnixNano())
+		n := rand.Intn(10)
+		if n == 0 {
+			c = http.StatusInternalServerError
+			m = "500 Internal Server Error"
+		} else {
+			c = http.StatusOK
+		}
+	} else {
+		// Generate specified HTTP error (if exists).
+		switch e {
+		case "400":
+			c = http.StatusBadRequest
+			m = "400 Bad Request"
+		case "401":
+			c = http.StatusUnauthorized
+			m = "401 Unauthorized"
+		case "500":
+			c = http.StatusInternalServerError
+			m = "500 Internal Server Error"
+		default:
+			c = http.StatusOK
+		}
+	}
+	return c, m
+}
+
+func metricsEndpoint() http.Handler {
+	return promhttp.Handler()
+}
+
+func indexEndpoint(w http.ResponseWriter, r *http.Request) {
+	c := http.StatusOK
+	start := time.Now()
+	defer func() { recordMetrics(start, r, c) }()
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+
+	// Add artificial latency.
+	l := r.URL.Query().Get("latency")
+	if len(l) > 0 {
+		latency(l)
+	}
+	// Generate HTTP errors.
+	e := r.URL.Query().Get("error")
+	if len(e) > 0 {
+		var resp string
+		c, resp = httpError(e)
+		if c != 200 {
+			log.Printf("error: " + resp)
+			http.Error(w, resp, c)
+			return
+		}
+	}
+
+	resp := "Hello, world!"
+	_, _ = io.WriteString(w, resp)
+}
+
+func healthEndpoint(w http.ResponseWriter, r *http.Request) {
+	_, _ = io.WriteString(w, "200 OK\n")
+}
+
+func createPersonEndpoint(w http.ResponseWriter, r *http.Request) {
+	c := http.StatusOK
+	start := time.Now()
+	defer func() { recordMetrics(start, r, c) }()
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+	w.Header().Set("Content-Type", "application/json")
+
+	var person Person
+	err := json.NewDecoder(r.Body).Decode(&person)
+	if err != nil {
+		log.Fatalf("error: %s", err)
+	}
+
+	coll := client.Database("observer").Collection("people")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := coll.InsertOne(ctx, person)
+	if err != nil {
+		log.Fatalf("error: %s", err)
+	}
+
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func getPersonEndpoint(w http.ResponseWriter, r *http.Request) {
+	c := http.StatusOK
+	start := time.Now()
+	defer func() { recordMetrics(start, r, c) }()
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+	w.Header().Set("Content-Type", "application/json")
+
+	params := mux.Vars(r)
+	id, err := primitive.ObjectIDFromHex(params["id"])
+	if err != nil {
+		log.Fatalf("error: %s", err)
+	}
+
+	var person Person
+	coll := client.Database("observer").Collection("people")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err = coll.FindOne(ctx, Person{ID: id}).Decode(&person)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(person)
+}
+
+func getPeopleEndpoint(w http.ResponseWriter, r *http.Request) {
+	c := http.StatusOK
+	start := time.Now()
+	defer func() { recordMetrics(start, r, c) }()
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+	w.Header().Set("Content-Type", "application/json")
+
+	var people []Person
+	coll := client.Database("observer").Collection("people")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cursor, err := coll.Find(ctx, bson.M{})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, err = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		if err != nil {
+			log.Fatalf("error: %s", err)
+		}
+		return
+	}
+	defer func(cursor *mongo.Cursor, ctx context.Context) {
+		err = cursor.Close(ctx)
+		if err != nil {
+			log.Fatalf("error: %s", err)
+		}
+	}(cursor, ctx)
+	for cursor.Next(ctx) {
+		var person Person
+		_ = cursor.Decode(&person)
+		people = append(people, person)
+	}
+	if err := cursor.Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(people)
 }
