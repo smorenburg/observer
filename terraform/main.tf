@@ -1,7 +1,3 @@
-# ---------------------------------------------------------------------------------------------------------------------
-# TERRAFORM CONFIGURATION
-# ---------------------------------------------------------------------------------------------------------------------
-
 terraform {
   required_version = "~> 1.0"
 
@@ -19,126 +15,200 @@ terraform {
   backend "gcs" {}
 }
 
-# ---------------------------------------------------------------------------------------------------------------------
-# NETWORK, SERVICE ACCOUNT, CLUSTER, AND NODE POOLS
-# ---------------------------------------------------------------------------------------------------------------------
+provider "google" {
+  project = var.project_id
+  region  = var.region
+}
 
-module "network" {
-  source = "github.com/incentro-cloud/terraform-google-network"
+provider "google-beta" {
+  project = var.project_id
+  region  = var.region
+}
 
-  project_id = var.project_id
-  name       = "vpc-network"
-
-  subnets = [
-    {
-      name                     = "nodes"
-      ip_cidr_range            = "10.0.2.0/23"
-      region                   = "europe-west1"
-      private_ip_google_access = true
-
-      log_config = {
-        aggregation_interval = "INTERVAL_5_SEC"
-        flow_sampling        = "0.5"
-        metadata             = "INCLUDE_ALL_METADATA"
-      }
-
-      secondary_ip_ranges = [
-        {
-          range_name    = "pods"
-          ip_cidr_range = "10.0.16.0/20"
-        },
-        {
-          range_name    = "services"
-          ip_cidr_range = "10.0.32.0/20"
-        }
-      ]
-    }
+locals {
+  apis = [
+    "compute.googleapis.com",
+    "container.googleapis.com"
   ]
-
-  rules = [
-    {
-      name        = "allow-iap-ingress"
-      direction   = "INGRESS"
-      ranges      = ["35.235.240.0/20"]
-      target_tags = ["iap"]
-
-      allow = [
-        {
-          protocol = "tcp"
-          ports    = ["22", "3389"]
-        }
-      ]
-    },
-    {
-      name      = "allow-internal-ingress"
-      direction = "INGRESS"
-      priority  = 65534
-      ranges    = ["10.0.2.0/23"]
-
-      allow = [
-        {
-          protocol = "icmp"
-        },
-        {
-          protocol = "tcp"
-        },
-        {
-          protocol = "udp"
-        }
-      ]
-    }
-  ]
-
-  routers = [
-    {
-      name       = "vpc-router"
-      region     = "europe-west1"
-      create_nat = true
-    }
+  cluster_01_service_account_roles = [
+    "roles/logging.logWriter",
+    "roles/monitoring.metricWriter",
+    "roles/monitoring.viewer",
+    "roles/stackdriver.resourceMetadata.writer",
+    "roles/compute.securityAdmin"
   ]
 }
 
-module "kubernetes" {
-  source = "github.com/incentro-cloud/terraform-google-kubernetes"
+# Enable the APIs
+resource "google_project_service" "apis" {
+  for_each           = toset(local.apis)
+  service            = each.value
+  disable_on_destroy = false
+}
 
-  project_id            = var.project_id
-  name                  = "cluster-01"
-  location              = "europe-west1-b"
-  node_locations        = ["europe-west1-c"]
-  network               = module.network.vpc_id
-  subnetwork            = "nodes"
-  service_account_roles = ["roles/compute.securityAdmin"]
+# Create network and subnetwork, including secondary ranges and firewall rules.
+resource "google_compute_network" "vpc_network" {
+  name                    = "vpc-network"
+  auto_create_subnetworks = false
 
-  monitoring_config = {
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_compute_subnetwork" "nodes" {
+  name                     = "nodes"
+  ip_cidr_range            = "10.0.2.0/23"
+  network                  = google_compute_network.vpc_network.id
+  private_ip_google_access = true
+
+  log_config {
+    aggregation_interval = "INTERVAL_5_SEC"
+    flow_sampling        = "0.5"
+    metadata             = "INCLUDE_ALL_METADATA"
+  }
+
+  secondary_ip_range {
+    range_name    = "pods"
+    ip_cidr_range = "10.0.16.0/20"
+  }
+
+  secondary_ip_range {
+    range_name    = "services"
+    ip_cidr_range = "10.0.32.0/20"
+  }
+}
+
+resource "google_compute_firewall" "allow_iap_ingress" {
+  name          = "allow-iap-ingress"
+  network       = google_compute_network.vpc_network.id
+  direction     = "INGRESS"
+  source_ranges = ["35.235.240.0/20"]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22", "3389"]
+  }
+
+  target_tags = ["nodes"]
+}
+
+resource "google_compute_firewall" "allow_metrics_ingress" {
+  name          = "allow-metrics-ingress"
+  network       = google_compute_network.vpc_network.id
+  direction     = "INGRESS"
+  source_ranges = [google_container_cluster.cluster_01.private_cluster_config[0].master_ipv4_cidr_block]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["9090"]
+  }
+
+  target_tags = ["nodes"]
+}
+
+resource "google_compute_firewall" "allow_internal_ingress" {
+  name          = "allow-internal-ingress"
+  network       = google_compute_network.vpc_network.id
+  direction     = "INGRESS"
+  priority      = 65534
+  source_ranges = [google_compute_subnetwork.nodes.ip_cidr_range]
+
+  allow {
+    protocol = "tcp"
+  }
+  allow {
+    protocol = "udp"
+  }
+  allow {
+    protocol = "icmp"
+  }
+}
+
+# Create the router and router NAT.
+resource "google_compute_router" "vpc_router" {
+  name    = "vpc-router"
+  network = google_compute_network.vpc_network.id
+}
+
+resource "google_compute_router_nat" "vpc_router_nat" {
+  name                               = "vpc-router-nat"
+  router                             = google_compute_router.vpc_router.name
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_PRIMARY_IP_RANGES"
+
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
+}
+
+# Create the public IP for the observer ingress resource.
+resource "google_compute_global_address" "cluster_01_observer_ingress" {
+  name = "cluster-01-observer-ingress"
+
+  depends_on = [google_project_service.apis]
+}
+
+# Create the service account for the GKE cluster node pools and bind roles.
+resource "google_service_account" "cluster_01" {
+  account_id = "cluster-01"
+
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_project_iam_member" "cluster_01_service_account_roles" {
+  for_each = toset(local.cluster_01_service_account_roles)
+  project  = var.project_id
+  role     = each.value
+  member   = "serviceAccount:${google_service_account.cluster_01.email}"
+}
+
+# Create the GKE cluster and node pool.
+resource "google_container_cluster" "cluster_01" {
+  provider = google-beta
+
+  name                        = "cluster-01"
+  location                    = var.region
+  node_locations              = ["europe-west4-a", "europe-west4-b", "europe-west4-c"]
+  remove_default_node_pool    = true
+  initial_node_count          = 1
+  network                     = google_compute_network.vpc_network.id
+  subnetwork                  = google_compute_subnetwork.nodes.id
+  networking_mode             = "VPC_NATIVE"
+  enable_intranode_visibility = true
+
+  monitoring_config {
     enable_components = ["SYSTEM_COMPONENTS", "WORKLOADS"]
   }
 
-  private_cluster_config = {
-    master_ipv4_cidr_block = "172.16.0.0/28"
+  private_cluster_config {
+    enable_private_nodes    = true
+    enable_private_endpoint = false
+    master_ipv4_cidr_block  = "192.168.0.0/28"
   }
 
-  ip_allocation_policy = {
+  ip_allocation_policy {
     cluster_secondary_range_name  = "pods"
     services_secondary_range_name = "services"
   }
+}
 
-  node_pools = [
-    {
-      name               = "node-pool-01"
-      initial_node_count = 1
+resource "google_container_node_pool" "node_pool_01" {
+  name               = "node-pool-01"
+  cluster            = google_container_cluster.cluster_01.name
+  location           = google_container_cluster.cluster_01.location
+  node_locations     = google_container_cluster.cluster_01.node_locations
+  initial_node_count = 1
 
-      autoscaling = {
-        min_node_count = 1
-        max_node_count = 3
-      }
+  autoscaling {
+    min_node_count = 1
+    max_node_count = 3
+  }
 
-      node_config = {
-        preemptible  = true
-        machine_type = "e2-small"
-        tags         = ["iap"]
-      }
-    }
-  ]
-
-  depends_on = [module.network]
+  node_config {
+    preemptible     = true
+    machine_type    = "e2-medium"
+    tags            = ["nodes"]
+    service_account = google_service_account.cluster_01.email
+    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+  }
 }
