@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: observer-api
+  namespace: observer
+  annotations:
+    cloud.google.com/backend-config: '{"ports": {"http":"observer-api"}}'
+spec:
+  type: ClusterIP
+  selector:
+    app: observer
+    type: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+
+---
+
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: observer-api
+  namespace: observer
+spec:
+  healthCheck:
+    checkIntervalSec: 15
+    port: 8080
+    requestPath: /health
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: observer-api
+  namespace: observer
+spec:
+  selector:
+    matchLabels:
+      app: observer
+      type: api
+  template:
+    metadata:
+      labels:
+        app: observer
+        type: api
+        language: go
+    spec:
+      containers:
+        - name: main
+          image: smorenburg/observer:0.1.7
+          env:
+            - name: DB
+              value: observer-db-0.observer-db.observer.svc.cluster.local
+          ports:
+            - name: default
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          resources:
+            requests:
+              cpu: 200m
+              memory: 100Mi
+            limits:
+              cpu: 200m
+              memory: 100Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+
+---
+
+apiVersion: autoscaling/v2beta1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: observer-api
+  namespace: observer
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: observer-api
+  minReplicas: 3
+  maxReplicas: 9
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        targetAverageUtilization: 80
+    - type: Resource
+      resource:
+        name: memory
+        targetAverageUtilization: 80
+
+---
+
+apiVersion: monitoring.gke.io/v1alpha1
+kind: PodMonitor
+metadata:
+  name: observer-api
+  namespace: observer
+spec:
+  selector:
+    matchLabels:
+      app: observer
+      type: api
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      scheme: http
+      interval: 20s

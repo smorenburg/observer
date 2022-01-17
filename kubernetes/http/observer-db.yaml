@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: observer-db
+  namespace: observer
+spec:
+  ports:
+    - port: 27017
+      targetPort: 27017
+  clusterIP: None
+  selector:
+    app: observer
+    type: db
+
+---
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: observer-db
+  namespace: observer
+spec:
+  serviceName: observer-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: observer
+      type: db
+  template:
+    metadata:
+      labels:
+        app: observer
+        type: db
+        vendor: MongoDB
+    spec:
+      terminationGracePeriodSeconds: 10
+      volumes:
+        - name: observer-db
+          persistentVolumeClaim:
+            claimName: observer-db
+      containers:
+        - name: main
+          image: mongo
+          command:
+            - mongod
+            - --bind_ip
+            - 0.0.0.0
+          resources:
+            requests:
+              cpu: 200m
+              memory: 200Mi
+          ports:
+            - containerPort: 27017
+          volumeMounts:
+            - name: observer-db
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: observer-db
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: regional-ssd
+        resources:
+          requests:
+            storage: 1Gi
