@@ -175,7 +175,7 @@ func indexEndpoint(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, resp)
 }
 
-func healthEndpoint(w http.ResponseWriter, r *http.Request) {
+func healthEndpoint(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, "200 OK\n")
 }
 
