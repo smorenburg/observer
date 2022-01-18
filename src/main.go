@@ -21,9 +21,21 @@ import (
 	"time"
 )
 
-var port string
-var client *mongo.Client
-var svc = "observer"
+type handler struct {
+	Mux    *mux.Router
+	Client *mongo.Client
+}
+
+type document struct {
+	ID      primitive.ObjectID `json:"_id,omitempty" bson:"_id,omitempty"`
+	Title   string             `json:"Title,omitempty" bson:"Title,omitempty"`
+	Content string             `json:"Content,omitempty" bson:"Content,omitempty"`
+}
+
+type statusCode struct {
+	Code    int
+	Message string
+}
 
 var (
 	histogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -38,63 +50,245 @@ var (
 	})
 )
 
-type Person struct {
-	ID        primitive.ObjectID `json:"_id,omitempty" bson:"_id,omitempty"`
-	FirstName string             `json:"FirstName,omitempty" bson:"FirstName,omitempty"`
-	LastName  string             `json:"LastName,omitempty" bson:"LastName,omitempty"`
-}
-
 func init() {
-	port = os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	log.Printf("Starting the application on port %s...\n", port)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	host := os.Getenv("DB")
-	if host == "" {
-		host = "localhost"
-	}
-	uri := "mongodb://" + host + ":27017"
-	clientOptions := options.Client().ApplyURI(uri)
-	client, _ = mongo.Connect(ctx, clientOptions)
-	log.Printf("Connecting to the database on %s...\n", host)
-	err := client.Ping(ctx, readpref.Primary())
-	if err != nil {
-		log.Fatalf("error: %s", err)
-	}
-	log.Printf("Successfully connected to the database")
 	prometheus.MustRegister(histogram)
 }
 
 func main() {
-	h := mux.NewRouter()
-	h.HandleFunc("/", indexEndpoint).Methods("GET")
-	h.HandleFunc("/health", healthEndpoint).Methods("GET")
-	h.HandleFunc("/person", createPersonEndpoint).Methods("POST")
-	h.HandleFunc("/people", getPeopleEndpoint).Methods("GET")
-	h.HandleFunc("/person/{id}", getPersonEndpoint).Methods("GET")
+	p, mp := os.Getenv("PORT"), os.Getenv("METRICS_PORT")
+	if p == "" {
+		p = "8080"
+	}
+	if mp == "" {
+		mp = "9090"
+	}
 
-	hm := mux.NewRouter()
-	hm.Handle("/metrics", metricsEndpoint()).Methods("GET")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	go func() {
-		log.Fatal(http.ListenAndServe(":9090", hm))
-	}()
-	log.Fatal(http.ListenAndServe(":"+port, h))
+	mh, _ := newMetricsHandler()
+
+	mh.Mux = mux.NewRouter()
+	mh.Mux.Handle("/metrics", mh.metrics()).Methods("GET")
+
+	log.Printf("Serving metrics on port %s...\n", mp)
+	go func() { log.Fatal(http.ListenAndServe(":"+mp, mh.Mux)) }()
+
+	h, _ := newHandler(ctx)
+
+	h.Mux = mux.NewRouter()
+	h.Mux.HandleFunc("/", h.index).Methods("GET")
+	h.Mux.HandleFunc("/health", h.health).Methods("GET")
+	h.Mux.HandleFunc("/document", h.createDocument).Methods("POST")
+	h.Mux.HandleFunc("/document/{id}", h.getDocument).Methods("GET")
+	h.Mux.HandleFunc("/documents", h.getDocuments).Methods("GET")
+
+	log.Printf("Listening on port %s...\n", p)
+	log.Fatal(http.ListenAndServe(":"+p, h.Mux))
 }
 
-func recordMetrics(start time.Time, req *http.Request, code int) {
-	duration := time.Since(start)
-	histogram.With(
-		prometheus.Labels{
-			"service": svc,
-			"code":    fmt.Sprintf("%d", code),
-			"method":  req.Method,
-			"path":    req.URL.Path,
-		},
-	).Observe(duration.Seconds())
+func newHandler(ctx context.Context) (*handler, error) {
+	host := os.Getenv("DB_HOSTNAME")
+	if host == "" {
+		host = "localhost"
+	}
+
+	var uri string
+	user, pwd := os.Getenv("DB_USERNAME"), os.Getenv("DB_PASSWORD")
+	if user != "" && pwd != "" {
+		uri = "mongodb://" + user + ":" + pwd + "@" + host + ":27017"
+	} else {
+		uri = "mongodb://" + host + ":27017"
+	}
+
+	h := &handler{}
+
+	o := options.Client().ApplyURI(uri)
+	h.Client, _ = mongo.Connect(ctx, o)
+
+	log.Printf("Connecting to the database on %s:27017...\n", host)
+
+	err := h.Client.Ping(ctx, readpref.Primary())
+	if err != nil {
+		log.Fatalf("error: %s", err)
+	}
+
+	log.Printf("Successfully connected to the database")
+	return h, nil
+}
+
+func newMetricsHandler() (*handler, error) {
+	mh := &handler{}
+	return mh, nil
+}
+
+func (h *handler) index(w http.ResponseWriter, r *http.Request) {
+	c := http.StatusOK
+	start := time.Now()
+	defer func() { recordMetrics(start, r, c) }()
+
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+
+	// Add artificial latency.
+	l := r.URL.Query().Get("latency")
+	if len(l) > 0 {
+		latency(l)
+	}
+	// Generate HTTP errors.
+	e := r.URL.Query().Get("error")
+	if len(e) > 0 {
+		var m string
+		c, m = httpError(e)
+		if c != 200 {
+			log.Printf("error: " + m)
+			http.Error(w, m, c)
+			return
+		}
+	}
+
+	resp := "Hello, world!\n"
+	_, _ = io.WriteString(w, resp)
+}
+
+func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
+	_, _ = io.WriteString(w, "200 OK\n")
+}
+
+func (h *handler) createDocument(w http.ResponseWriter, r *http.Request) {
+	c := http.StatusOK
+	start := time.Now()
+	defer func() { recordMetrics(start, r, c) }()
+
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+
+	// Add artificial latency.
+	l := r.URL.Query().Get("latency")
+	if len(l) > 0 {
+		latency(l)
+	}
+	// Generate HTTP errors.
+	e := r.URL.Query().Get("error")
+	if len(e) > 0 {
+		var m string
+		c, m = httpError(e)
+		if c != 200 {
+			log.Printf("error: " + m)
+			http.Error(w, m, c)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	var d document
+	_ = json.NewDecoder(r.Body).Decode(&d)
+
+	coll := h.Client.Database("observer").Collection("documents")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	res, _ := coll.InsertOne(ctx, d)
+	_ = json.NewEncoder(w).Encode(res)
+}
+
+func (h *handler) getDocument(w http.ResponseWriter, r *http.Request) {
+	c := http.StatusOK
+	start := time.Now()
+	defer func() { recordMetrics(start, r, c) }()
+
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+
+	// Add artificial latency.
+	l := r.URL.Query().Get("latency")
+	if len(l) > 0 {
+		latency(l)
+	}
+	// Generate HTTP errors.
+	e := r.URL.Query().Get("error")
+	if len(e) > 0 {
+		var m string
+		c, m = httpError(e)
+		if c != 200 {
+			log.Printf("error: " + m)
+			http.Error(w, m, c)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	params := mux.Vars(r)
+	id, _ := primitive.ObjectIDFromHex(params["id"])
+
+	var d document
+	coll := h.Client.Database("observer").Collection("documents")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := coll.FindOne(ctx, document{ID: id}).Decode(&d)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(d)
+}
+
+func (h *handler) getDocuments(w http.ResponseWriter, r *http.Request) {
+	c := http.StatusOK
+	start := time.Now()
+	defer func() { recordMetrics(start, r, c) }()
+
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+
+	// Add artificial latency.
+	l := r.URL.Query().Get("latency")
+	if len(l) > 0 {
+		latency(l)
+	}
+	// Generate HTTP errors.
+	e := r.URL.Query().Get("error")
+	if len(e) > 0 {
+		var m string
+		c, m = httpError(e)
+		if c != 200 {
+			log.Printf("error: " + m)
+			http.Error(w, m, c)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	var xd []document
+	coll := h.Client.Database("observer").Collection("documents")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cursor, err := coll.Find(ctx, bson.M{})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+
+	for cursor.Next(ctx) {
+		var d document
+		_ = cursor.Decode(&d)
+		xd = append(xd, d)
+	}
+	if err := cursor.Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(xd)
+}
+
+func (h *handler) metrics() http.Handler {
+	return promhttp.Handler()
 }
 
 func latency(l string) {
@@ -115,159 +309,53 @@ func latency(l string) {
 func httpError(e string) (int, string) {
 	var c int
 	var m string
+	xsc := []statusCode{
+		{Code: 400, Message: "400 Bad Request"},
+		{Code: 401, Message: "401 Unauthorized"},
+		{Code: 403, Message: "403 Forbidden"},
+		{Code: 404, Message: "404 Not Found"},
+		{Code: 500, Message: "500 Internal Server Error"},
+		{Code: 501, Message: "501 Not Implemented"},
+		{Code: 502, Message: "502 Bad Gateway"},
+		{Code: 503, Message: "503 Service Unavailable"},
+		{Code: 504, Message: "504 Gateway Timeout"},
+		{Code: 505, Message: "505 HTTP Version Not Supported"},
+		{Code: 506, Message: "506 Variant Also Negotiates"},
+		{Code: 507, Message: "507 Insufficient Storage"},
+		{Code: 510, Message: "510 Not Extended"},
+	}
 	if e == "random" {
-		// Generate random HTTP server error 500.
+		// Generate random HTTP error.
 		rand.Seed(time.Now().UnixNano())
 		n := rand.Intn(10)
 		if n == 0 {
-			c = http.StatusInternalServerError
-			m = "500 Internal Server Error"
+			sc := xsc[rand.Intn(len(xsc))]
+			c, m = sc.Code, sc.Message
 		} else {
-			c = http.StatusOK
+			c = 200
 		}
 	} else {
-		// Generate specified HTTP error (if exists).
-		switch e {
-		case "400":
-			c = http.StatusBadRequest
-			m = "400 Bad Request"
-		case "401":
-			c = http.StatusUnauthorized
-			m = "401 Unauthorized"
-		case "500":
-			c = http.StatusInternalServerError
-			m = "500 Internal Server Error"
-		default:
-			c = http.StatusOK
+		for i, v := range xsc {
+			str := strconv.Itoa(xsc[i].Code)
+			if e == str {
+				c, m = v.Code, v.Message
+				break
+			} else {
+				c = 200
+			}
 		}
 	}
 	return c, m
 }
 
-func metricsEndpoint() http.Handler {
-	return promhttp.Handler()
-}
-
-func indexEndpoint(w http.ResponseWriter, r *http.Request) {
-	c := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, r, c) }()
-	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
-
-	// Add artificial latency.
-	l := r.URL.Query().Get("latency")
-	if len(l) > 0 {
-		latency(l)
-	}
-	// Generate HTTP errors.
-	e := r.URL.Query().Get("error")
-	if len(e) > 0 {
-		var resp string
-		c, resp = httpError(e)
-		if c != 200 {
-			log.Printf("error: " + resp)
-			http.Error(w, resp, c)
-			return
-		}
-	}
-
-	resp := "Hello, world!\n"
-	_, _ = io.WriteString(w, resp)
-}
-
-func healthEndpoint(w http.ResponseWriter, _ *http.Request) {
-	_, _ = io.WriteString(w, "200 OK\n")
-}
-
-func createPersonEndpoint(w http.ResponseWriter, r *http.Request) {
-	c := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, r, c) }()
-	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
-	w.Header().Set("Content-Type", "application/json")
-
-	var person Person
-	err := json.NewDecoder(r.Body).Decode(&person)
-	if err != nil {
-		log.Fatalf("error: %s", err)
-	}
-
-	coll := client.Database("observer").Collection("people")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := coll.InsertOne(ctx, person)
-	if err != nil {
-		log.Fatalf("error: %s", err)
-	}
-
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
-func getPersonEndpoint(w http.ResponseWriter, r *http.Request) {
-	c := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, r, c) }()
-	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
-	w.Header().Set("Content-Type", "application/json")
-
-	params := mux.Vars(r)
-	id, err := primitive.ObjectIDFromHex(params["id"])
-	if err != nil {
-		log.Fatalf("error: %s", err)
-	}
-
-	var person Person
-	coll := client.Database("observer").Collection("people")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	err = coll.FindOne(ctx, Person{ID: id}).Decode(&person)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
-		return
-	}
-
-	_ = json.NewEncoder(w).Encode(person)
-}
-
-func getPeopleEndpoint(w http.ResponseWriter, r *http.Request) {
-	c := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, r, c) }()
-	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
-	w.Header().Set("Content-Type", "application/json")
-
-	var people []Person
-	coll := client.Database("observer").Collection("people")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cursor, err := coll.Find(ctx, bson.M{})
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, err = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
-		if err != nil {
-			log.Fatalf("error: %s", err)
-		}
-		return
-	}
-	defer func(cursor *mongo.Cursor, ctx context.Context) {
-		err = cursor.Close(ctx)
-		if err != nil {
-			log.Fatalf("error: %s", err)
-		}
-	}(cursor, ctx)
-	for cursor.Next(ctx) {
-		var person Person
-		_ = cursor.Decode(&person)
-		people = append(people, person)
-	}
-	if err := cursor.Err(); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
-		return
-	}
-
-	_ = json.NewEncoder(w).Encode(people)
+func recordMetrics(start time.Time, req *http.Request, code int) {
+	duration := time.Since(start)
+	histogram.With(
+		prometheus.Labels{
+			"service": "observer",
+			"code":    fmt.Sprintf("%d", code),
+			"method":  req.Method,
+			"path":    req.URL.Path,
+		},
+	).Observe(duration.Seconds())
 }
