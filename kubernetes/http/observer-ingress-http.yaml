@@ -1,0 +1,13 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: observer
+  namespace: observer
+  annotations:
+    kubernetes.io/ingress.global-static-ip-name: cluster-01-observer-ingress
+spec:
+  defaultBackend:
+    service:
+      name: observer-api
+      port:
+        number: 80

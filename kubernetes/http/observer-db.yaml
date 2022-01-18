@@ -33,6 +33,7 @@ spec:
         type: db
         vendor: MongoDB
     spec:
+      serviceAccountName: observer
       terminationGracePeriodSeconds: 10
       volumes:
         - name: observer-db
@@ -40,20 +41,74 @@ spec:
             claimName: observer-db
       containers:
         - name: main
-          image: mongo
-          command:
-            - mongod
-            - --bind_ip
-            - 0.0.0.0
-          resources:
-            requests:
-              cpu: 200m
-              memory: 200Mi
+          image: mongo:5.0.5
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: observer
+                  key: db_username
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: observer
+                  key: db_password
           ports:
-            - containerPort: 27017
+            - name: default
+              containerPort: 27017
           volumeMounts:
             - name: observer-db
               mountPath: /data/db
+          resources:
+            limits:
+              cpu: 200m
+              memory: 500Mi
+            requests:
+              cpu: 200m
+              memory: 500Mi
+          livenessProbe:
+            exec:
+              command:
+                - mongo
+                - --disableImplicitSessions
+                - --eval
+                - db.adminCommand('ping')
+            initialDelaySeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - mongo
+                - --disableImplicitSessions
+                - --eval
+                - db.adminCommand('ping')
+            initialDelaySeconds: 10
+        - name: exporter
+          image: percona/mongodb_exporter:0.30.0
+          env:
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: observer
+                  key: db_username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: observer
+                  key: db_password
+          args:
+            - --web.listen-address=:9090
+            - --web.telemetry-path=/metrics
+            - --mongodb.uri=mongodb://$(DB_USERNAME):$(DB_PASSWORD)@localhost:27017
+          ports:
+            - name: metrics
+              containerPort: 9090
+          resources:
+            limits:
+              cpu: 200m
+              memory: 200Mi
+            requests:
+              cpu: 200m
+              memory: 200Mi
   volumeClaimTemplates:
     - metadata:
         name: observer-db
@@ -64,3 +119,21 @@ spec:
         resources:
           requests:
             storage: 1Gi
+
+---
+
+apiVersion: monitoring.gke.io/v1alpha1
+kind: PodMonitor
+metadata:
+  name: observer-db
+  namespace: observer
+spec:
+  selector:
+    matchLabels:
+      app: observer
+      type: db
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      scheme: http
+      interval: 15s

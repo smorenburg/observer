@@ -47,12 +47,23 @@ spec:
         type: api
         language: go
     spec:
+      serviceAccountName: observer
       containers:
         - name: main
-          image: smorenburg/observer:0.1.8
+          image: smorenburg/observer:0.2.0
           env:
-            - name: DB
+            - name: DB_HOSTNAME
               value: observer-db-0.observer-db.observer.svc.cluster.local
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: observer
+                  key: db_username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: observer
+                  key: db_password
           ports:
             - name: default
               containerPort: 8080
@@ -69,11 +80,12 @@ spec:
             httpGet:
               path: /health
               port: 8080
-            periodSeconds: 5
+            initialDelaySeconds: 10
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
+            initialDelaySeconds: 10
 
 ---
 
@@ -115,4 +127,4 @@ spec:
     - port: metrics
       path: /metrics
       scheme: http
-      interval: 20s
+      interval: 15s

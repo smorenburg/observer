@@ -5,22 +5,6 @@ metadata:
 
 ---
 
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: observer
-  namespace: observer
-  annotations:
-    kubernetes.io/ingress.global-static-ip-name: cluster-01-observer-ingress
-spec:
-  defaultBackend:
-    service:
-      name: observer-api
-      port:
-        number: 80
-
----
-
 kind: StorageClass
 apiVersion: storage.k8s.io/v1
 metadata:
@@ -30,3 +14,13 @@ parameters:
   type: pd-ssd
   replication-type: regional-pd
 volumeBindingMode: WaitForFirstConsumer
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: observer
+  namespace: observer
+  annotations:
+    iam.gke.io/gcp-service-account: cluster-01-observer@kubernetes-333808.iam.gserviceaccount.com
