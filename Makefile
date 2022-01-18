@@ -6,6 +6,12 @@ define TF_VARS
 -var="project_id=$(PROJECT_ID)"
 endef
 
+define TF_IMPORTS
+terraform import $(TF_VARS) google_kms_key_ring.cluster_01 projects/$(PROJECT_ID)/locations/europe-west4/keyRings/cluster-01; \
+terraform import $(TF_VARS) google_kms_crypto_key.secrets projects/$(PROJECT_ID)/locations/europe-west4/keyRings/cluster-01/cryptoKeys/secrets; \
+terraform import $(TF_VARS) google_kms_crypto_key.observer projects/$(PROJECT_ID)/locations/europe-west4/keyRings/cluster-01/cryptoKeys/observer
+endef
+
 # Run checkov.
 .PHONY: checkov
 checkov:
@@ -84,3 +90,10 @@ tf_destroy:
 	export GOOGLE_APPLICATION_CREDENTIALS=$(GOOGLE_APPLICATION_CREDENTIALS); \
 	cd terraform; \
 	terraform destroy -auto-approve $(TF_VARS)
+
+# Import specified resources.
+.PHONY: tf_import
+tf_import:
+	export GOOGLE_APPLICATION_CREDENTIALS=$(GOOGLE_APPLICATION_CREDENTIALS); \
+	cd terraform; \
+	$(TF_IMPORTS)
