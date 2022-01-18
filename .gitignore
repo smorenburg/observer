@@ -1,5 +1,6 @@
 # Secrets
 secrets/
+*secrets.yaml
 
 # User-specific stuff
 .idea/
