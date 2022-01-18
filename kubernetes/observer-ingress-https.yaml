@@ -9,6 +9,17 @@ spec:
 
 ---
 
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: observer
+  namespace: observer
+spec:
+  redirectToHttps:
+    enabled: true
+
+---
+
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -26,13 +37,3 @@ spec:
       port:
         number: 80
 
----
-
-apiVersion: networking.gke.io/v1beta1
-kind: FrontendConfig
-metadata:
-  name: observer
-  namespace: observer
-spec:
-  redirectToHttps:
-    enabled: true
