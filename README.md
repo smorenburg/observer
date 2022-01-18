@@ -9,12 +9,13 @@ docker push smorenburg/observer:tagname
 
 ```bash
 docker run -d -p 27017:27017 --name mongodb \
-      -e MONGO_INITDB_ROOT_USERNAME=admin \
-      -e MONGO_INITDB_ROOT_PASSWORD=password \
-      mongo
+  -e MONGO_INITDB_ROOT_USERNAME=admin \
+  -e MONGO_INITDB_ROOT_PASSWORD=password \
+  mongo
 ```
 
 ```bash
+# Encrypt secrets.
 export PROJECT_ID=project_id
 export KEY_ID=projects/$PROJECT_ID/locations/europe-west4/keyRings/cluster-01/cryptoKeys/observer
 sops --encrypt \
@@ -23,6 +24,7 @@ sops --encrypt \
 ```
 
 ```bash
+# Decrypt and deploy secrets.
 sops --decrypt observer-secrets.encrypted.yaml | kubectl apply -f -
 ```
 
