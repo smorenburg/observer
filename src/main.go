@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"github.com/gorilla/mux"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -21,274 +19,74 @@ import (
 	"time"
 )
 
-type handler struct {
-	Mux    *mux.Router
-	Client *mongo.Client
+type server struct {
+	router *mux.Router
+	client *mongo.Client
 }
 
-type document struct {
+type Document struct {
 	ID      primitive.ObjectID `json:"_id,omitempty" bson:"_id,omitempty"`
 	Title   string             `json:"Title,omitempty" bson:"Title,omitempty"`
 	Content string             `json:"Content,omitempty" bson:"Content,omitempty"`
 }
 
-type statusCode struct {
+type StatusCode struct {
 	Code    int
 	Message string
 }
 
-var (
-	histogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Subsystem: "http_server",
-		Name:      "resp_time",
-		Help:      "Request response time",
-	}, []string{
-		"service",
-		"code",
-		"method",
-		"path",
-	})
-)
-
-func init() {
-	prometheus.MustRegister(histogram)
-}
-
 func main() {
-	p, mp := os.Getenv("PORT"), os.Getenv("METRICS_PORT")
-	if p == "" {
-		p = "8080"
-	}
-	if mp == "" {
-		mp = "9090"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	mh, _ := newMetricsHandler()
-
-	mh.Mux = mux.NewRouter()
-	mh.Mux.Handle("/metrics", mh.metrics()).Methods("GET")
-
-	log.Printf("Serving metrics on port %s...\n", mp)
-	go func() { log.Fatal(http.ListenAndServe(":"+mp, mh.Mux)) }()
-
-	h, _ := newHandler(ctx)
-
-	h.Mux = mux.NewRouter()
-	h.Mux.HandleFunc("/", h.index).Methods("GET")
-	h.Mux.HandleFunc("/health", h.health).Methods("GET")
-	h.Mux.HandleFunc("/document", h.createDocument).Methods("POST")
-	h.Mux.HandleFunc("/document/{id}", h.getDocument).Methods("GET")
-	h.Mux.HandleFunc("/documents", h.getDocuments).Methods("GET")
-
-	log.Printf("Listening on port %s...\n", p)
-	log.Fatal(http.ListenAndServe(":"+p, h.Mux))
+	sm, _ := newServerMetrics()
+	sm.router, _ = newServerMetricsRouter(sm)
+	go func() { log.Fatal(http.ListenAndServe(":9090", sm.router)) }()
+	s, _ := newServer()
+	s.router, _ = newServerRouter(s)
+	log.Printf("Ready to serve...\n")
+	log.Fatal(http.ListenAndServe(":8080", s.router))
 }
 
-func newHandler(ctx context.Context) (*handler, error) {
+func newServer() (*server, error) {
+	s := &server{}
+	s.client = connectClient()
+	return s, nil
+}
+
+func newServerRouter(s *server) (*mux.Router, error) {
+	s.router = mux.NewRouter()
+	s.router.HandleFunc("/health", s.health).Methods("GET")
+	s.router.HandleFunc("/document", s.insertOne).Methods("POST")
+	s.router.HandleFunc("/document/{id}", s.findOne).Methods("GET")
+	s.router.HandleFunc("/documents", s.find).Methods("GET")
+	return s.router, nil
+}
+
+func newServerMetrics() (*server, error) {
+	sm := &server{}
+	return sm, nil
+}
+
+func newServerMetricsRouter(sm *server) (*mux.Router, error) {
+	sm.router = mux.NewRouter()
+	sm.router.Handle("/metrics", sm.metrics()).Methods("GET")
+	return sm.router, nil
+}
+
+func connectClient() *mongo.Client {
 	host := os.Getenv("DB_HOSTNAME")
 	if host == "" {
 		host = "localhost"
 	}
-
-	var uri string
 	user, pwd := os.Getenv("DB_USERNAME"), os.Getenv("DB_PASSWORD")
-	if user != "" && pwd != "" {
-		uri = "mongodb://" + user + ":" + pwd + "@" + host + ":27017"
-	} else {
-		uri = "mongodb://" + host + ":27017"
-	}
-
-	h := &handler{}
-
-	o := options.Client().ApplyURI(uri)
-	h.Client, _ = mongo.Connect(ctx, o)
-
-	log.Printf("Connecting to the database on %s:27017...\n", host)
-
-	err := h.Client.Ping(ctx, readpref.Primary())
+	uri := "mongodb://" + user + ":" + pwd + "@" + host + ":27017"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	opt := options.Client().ApplyURI(uri)
+	client, _ := mongo.Connect(ctx, opt)
+	err := client.Ping(ctx, readpref.Primary())
 	if err != nil {
 		log.Fatalf("error: %s", err)
 	}
-
-	log.Printf("Successfully connected to the database")
-	return h, nil
-}
-
-func newMetricsHandler() (*handler, error) {
-	mh := &handler{}
-	return mh, nil
-}
-
-func (h *handler) index(w http.ResponseWriter, r *http.Request) {
-	c := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, r, c) }()
-
-	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
-
-	// Add artificial latency.
-	l := r.URL.Query().Get("latency")
-	if len(l) > 0 {
-		latency(l)
-	}
-	// Generate HTTP errors.
-	e := r.URL.Query().Get("error")
-	if len(e) > 0 {
-		var m string
-		c, m = httpError(e)
-		if c != 200 {
-			log.Printf("error: " + m)
-			http.Error(w, m, c)
-			return
-		}
-	}
-
-	resp := "Hello, world!\n"
-	_, _ = io.WriteString(w, resp)
-}
-
-func (h *handler) health(w http.ResponseWriter, _ *http.Request) {
-	_, _ = io.WriteString(w, "200 OK\n")
-}
-
-func (h *handler) createDocument(w http.ResponseWriter, r *http.Request) {
-	c := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, r, c) }()
-
-	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
-
-	// Add artificial latency.
-	l := r.URL.Query().Get("latency")
-	if len(l) > 0 {
-		latency(l)
-	}
-	// Generate HTTP errors.
-	e := r.URL.Query().Get("error")
-	if len(e) > 0 {
-		var m string
-		c, m = httpError(e)
-		if c != 200 {
-			log.Printf("error: " + m)
-			http.Error(w, m, c)
-			return
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-
-	var d document
-	_ = json.NewDecoder(r.Body).Decode(&d)
-
-	coll := h.Client.Database("observer").Collection("documents")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	res, _ := coll.InsertOne(ctx, d)
-	_ = json.NewEncoder(w).Encode(res)
-}
-
-func (h *handler) getDocument(w http.ResponseWriter, r *http.Request) {
-	c := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, r, c) }()
-
-	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
-
-	// Add artificial latency.
-	l := r.URL.Query().Get("latency")
-	if len(l) > 0 {
-		latency(l)
-	}
-	// Generate HTTP errors.
-	e := r.URL.Query().Get("error")
-	if len(e) > 0 {
-		var m string
-		c, m = httpError(e)
-		if c != 200 {
-			log.Printf("error: " + m)
-			http.Error(w, m, c)
-			return
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-
-	params := mux.Vars(r)
-	id, _ := primitive.ObjectIDFromHex(params["id"])
-
-	var d document
-	coll := h.Client.Database("observer").Collection("documents")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	err := coll.FindOne(ctx, document{ID: id}).Decode(&d)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
-		return
-	}
-	_ = json.NewEncoder(w).Encode(d)
-}
-
-func (h *handler) getDocuments(w http.ResponseWriter, r *http.Request) {
-	c := http.StatusOK
-	start := time.Now()
-	defer func() { recordMetrics(start, r, c) }()
-
-	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
-
-	// Add artificial latency.
-	l := r.URL.Query().Get("latency")
-	if len(l) > 0 {
-		latency(l)
-	}
-	// Generate HTTP errors.
-	e := r.URL.Query().Get("error")
-	if len(e) > 0 {
-		var m string
-		c, m = httpError(e)
-		if c != 200 {
-			log.Printf("error: " + m)
-			http.Error(w, m, c)
-			return
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-
-	var xd []document
-	coll := h.Client.Database("observer").Collection("documents")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	cursor, err := coll.Find(ctx, bson.M{})
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
-		return
-	}
-	defer func() { _ = cursor.Close(ctx) }()
-
-	for cursor.Next(ctx) {
-		var d document
-		_ = cursor.Decode(&d)
-		xd = append(xd, d)
-	}
-	if err := cursor.Err(); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
-		return
-	}
-	_ = json.NewEncoder(w).Encode(xd)
-}
-
-func (h *handler) metrics() http.Handler {
-	return promhttp.Handler()
+	return client
 }
 
 func latency(l string) {
@@ -303,13 +101,10 @@ func latency(l string) {
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 	}
-	log.Printf("Request delayed for %v ms\n", ms)
 }
 
 func httpError(e string) (int, string) {
-	var c int
-	var m string
-	xsc := []statusCode{
+	xsc := []StatusCode{
 		{Code: 400, Message: "400 Bad Request"},
 		{Code: 401, Message: "401 Unauthorized"},
 		{Code: 403, Message: "403 Forbidden"},
@@ -324,38 +119,126 @@ func httpError(e string) (int, string) {
 		{Code: 507, Message: "507 Insufficient Storage"},
 		{Code: 510, Message: "510 Not Extended"},
 	}
+	var c = 200
+	var m string
 	if e == "random" {
-		// Generate random HTTP error.
 		rand.Seed(time.Now().UnixNano())
 		n := rand.Intn(10)
 		if n == 0 {
 			sc := xsc[rand.Intn(len(xsc))]
 			c, m = sc.Code, sc.Message
-		} else {
-			c = 200
 		}
 	} else {
-		for i, v := range xsc {
-			str := strconv.Itoa(xsc[i].Code)
-			if e == str {
+		ec, _ := strconv.Atoi(e)
+		for _, v := range xsc {
+			if ec == v.Code {
 				c, m = v.Code, v.Message
-				break
-			} else {
-				c = 200
 			}
 		}
 	}
 	return c, m
 }
 
-func recordMetrics(start time.Time, req *http.Request, code int) {
-	duration := time.Since(start)
-	histogram.With(
-		prometheus.Labels{
-			"service": "observer",
-			"code":    fmt.Sprintf("%d", code),
-			"method":  req.Method,
-			"path":    req.URL.Path,
-		},
-	).Observe(duration.Seconds())
+func (s *server) health(w http.ResponseWriter, _ *http.Request) {
+	_, _ = io.WriteString(w, "200 OK\n")
+}
+
+func (s *server) metrics() http.Handler {
+	return promhttp.Handler()
+}
+
+func (s *server) insertOne(w http.ResponseWriter, r *http.Request) {
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+	l := r.URL.Query().Get("latency")
+	if len(l) > 0 {
+		latency(l)
+	}
+	e := r.URL.Query().Get("error")
+	if len(e) > 0 {
+		c, m := httpError(e)
+		if c != 200 {
+			http.Error(w, m, c)
+			log.Printf("error: " + m)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	var d Document
+	_ = json.NewDecoder(r.Body).Decode(&d)
+	coll := s.client.Database("observer").Collection("documents")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, _ := coll.InsertOne(ctx, d)
+	_ = json.NewEncoder(w).Encode(res)
+}
+
+func (s *server) findOne(w http.ResponseWriter, r *http.Request) {
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+	l := r.URL.Query().Get("latency")
+	if len(l) > 0 {
+		latency(l)
+	}
+	e := r.URL.Query().Get("error")
+	if len(e) > 0 {
+		c, m := httpError(e)
+		if c != 200 {
+			http.Error(w, m, c)
+			log.Printf("error: " + m)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	vars := mux.Vars(r)
+	id, _ := primitive.ObjectIDFromHex(vars["id"])
+	var d Document
+	coll := s.client.Database("observer").Collection("documents")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := coll.FindOne(ctx, Document{ID: id}).Decode(&d)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(d)
+}
+
+func (s *server) find(w http.ResponseWriter, r *http.Request) {
+	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+	l := r.URL.Query().Get("latency")
+	if len(l) > 0 {
+		latency(l)
+	}
+	e := r.URL.Query().Get("error")
+	if len(e) > 0 {
+		c, m := httpError(e)
+		if c != 200 {
+			http.Error(w, m, c)
+			log.Printf("error: " + m)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	var xd []Document
+	coll := s.client.Database("observer").Collection("documents")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cursor, err := coll.Find(ctx, bson.M{})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	for cursor.Next(ctx) {
+		var d Document
+		_ = cursor.Decode(&d)
+		xd = append(xd, d)
+	}
+	if err = cursor.Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(xd)
 }
