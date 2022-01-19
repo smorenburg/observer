@@ -50,7 +50,7 @@ spec:
       serviceAccountName: observer
       containers:
         - name: main
-          image: smorenburg/observer:0.2.0
+          image: smorenburg/observer:0.3.0
           env:
             - name: DB_HOSTNAME
               value: observer-db-0.observer-db.observer.svc.cluster.local
