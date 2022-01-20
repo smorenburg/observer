@@ -85,7 +85,7 @@ resource "google_service_account_iam_binding" "cluster_01_observer_workload_iden
 # Create the keyring, encryption keys, and IAM bindings.
 resource "google_kms_key_ring" "cluster_01" {
   name     = "cluster-01"
-  location = "europe-west4"
+  location = var.region
 
   depends_on = [google_project_service.apis]
 }
