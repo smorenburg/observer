@@ -3,8 +3,8 @@ module github.com/smorenburg/observer/src
 go 1.17
 
 require (
-	github.com/go-redis/redis v6.15.9+incompatible
 	github.com/gorilla/mux v1.8.0
+	github.com/mailgun/groupcache v1.3.0
 	github.com/prometheus/client_golang v1.12.0
 	go.mongodb.org/mongo-driver v1.8.2
 )
@@ -17,8 +17,6 @@ require (
 	github.com/golang/snappy v0.0.1 // indirect
 	github.com/klauspost/compress v1.13.6 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
-	github.com/onsi/ginkgo v1.16.5 // indirect
-	github.com/onsi/gomega v1.17.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_model v0.2.0 // indirect
 	github.com/prometheus/common v0.32.1 // indirect

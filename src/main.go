@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"github.com/gorilla/mux"
+	"github.com/mailgun/groupcache"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -22,6 +24,8 @@ import (
 type server struct {
 	router *mux.Router
 	client *mongo.Client
+	pool   *groupcache.HTTPPool
+	group  *groupcache.Group
 }
 
 type Document struct {
@@ -35,43 +39,53 @@ type StatusCode struct {
 	Message string
 }
 
+type CacheStats struct {
+	Group     groupcache.Stats      `json:"Group,omitempty" bson:"Group,omitempty"`
+	MainCache groupcache.CacheStats `json:"MainCache,omitempty" bson:"MainCache,omitempty"`
+	HotCache  groupcache.CacheStats `json:"HotCache,omitempty" bson:"HotCache,omitempty"`
+}
+
 func main() {
+	// Create a new server for metrics, add the router, and serve.
 	sm, _ := newServerMetrics()
-	sm.router, _ = newServerMetricsRouter(sm)
+	sm.newServerMetricsRouter()
 	go func() { log.Fatal(http.ListenAndServe(":9090", sm.router)) }()
+	// Create a new server for metrics, add the router, and serve.
 	s, _ := newServer()
-	s.router, _ = newServerRouter(s)
-	log.Printf("Ready to serve...\n")
+	s.newServerRouter()
+	// Create a new cache pool and group.
+	s.newGroupCache()
+	log.Printf("Serving...\n")
 	log.Fatal(http.ListenAndServe(":8080", s.router))
 }
 
 func newServer() (*server, error) {
 	s := &server{}
-	s.client = connectClient()
+	s.connectClient()
 	return s, nil
 }
 
-func newServerRouter(s *server) (*mux.Router, error) {
+func newServerMetrics() (*server, error) {
+	s := &server{}
+	return s, nil
+}
+
+func (s *server) newServerRouter() {
 	s.router = mux.NewRouter()
 	s.router.HandleFunc("/health", s.health).Methods("GET")
+	s.router.HandleFunc("/stats", s.stats).Methods("GET")
 	s.router.HandleFunc("/document", s.insertOne).Methods("POST")
 	s.router.HandleFunc("/document/{id}", s.findOne).Methods("GET")
 	s.router.HandleFunc("/documents", s.find).Methods("GET")
-	return s.router, nil
 }
 
-func newServerMetrics() (*server, error) {
-	sm := &server{}
-	return sm, nil
+func (s *server) newServerMetricsRouter() {
+	s.router = mux.NewRouter()
+	s.router.Handle("/metrics", s.metrics()).Methods("GET")
 }
 
-func newServerMetricsRouter(sm *server) (*mux.Router, error) {
-	sm.router = mux.NewRouter()
-	sm.router.Handle("/metrics", sm.metrics()).Methods("GET")
-	return sm.router, nil
-}
-
-func connectClient() *mongo.Client {
+func (s *server) connectClient() {
+	log.Printf("Connecting to the database...\n")
 	host := os.Getenv("DB_HOSTNAME")
 	if host == "" {
 		host = "localhost"
@@ -81,15 +95,42 @@ func connectClient() *mongo.Client {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	opt := options.Client().ApplyURI(uri)
-	client, _ := mongo.Connect(ctx, opt)
-	err := client.Ping(ctx, readpref.Primary())
+	s.client, _ = mongo.Connect(ctx, opt)
+	err := s.client.Ping(ctx, readpref.Primary())
 	if err != nil {
 		log.Fatalf("error: %s", err)
 	}
-	return client
 }
 
-func latency(l string) {
+func (s *server) newGroupCache() {
+	peers := os.Getenv("CACHE_PEERS")
+	if peers == "" {
+		peers = "http://localhost:8080"
+	}
+	s.pool = groupcache.NewHTTPPoolOpts(peers, &groupcache.HTTPPoolOptions{})
+	s.group = groupcache.NewGroup("observer", 10485760, groupcache.GetterFunc(
+		func(ctx groupcache.Context, id string, dest groupcache.Sink) error {
+			log.Printf("Caching %s... \n", id)
+			pid, _ := primitive.ObjectIDFromHex(id)
+			var d Document
+			coll := s.client.Database("observer").Collection("documents")
+			ctxClient, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := coll.FindOne(ctxClient, Document{ID: pid}).Decode(&d)
+			if err != nil {
+				return err
+			}
+			buff := new(bytes.Buffer)
+			_ = json.NewEncoder(buff).Encode(d)
+			if err = dest.SetBytes(buff.Bytes(), time.Now().Add(time.Minute*5)); err != nil {
+				return err
+			}
+			return nil
+		},
+	))
+}
+
+func (s *server) latency(l string) {
 	var ms int
 	if l == "random" {
 		rand.Seed(time.Now().UnixNano())
@@ -103,7 +144,7 @@ func latency(l string) {
 	}
 }
 
-func httpError(e string) (int, string) {
+func (s *server) httpError(e string) (int, string) {
 	xsc := []StatusCode{
 		{Code: 400, Message: "400 Bad Request"},
 		{Code: 401, Message: "401 Unauthorized"},
@@ -147,15 +188,25 @@ func (s *server) metrics() http.Handler {
 	return promhttp.Handler()
 }
 
+func (s *server) stats(w http.ResponseWriter, _ *http.Request) {
+	var xcs CacheStats
+	xcs.Group = s.group.Stats
+	xcs.MainCache = s.group.CacheStats(1)
+	xcs.HotCache = s.group.CacheStats(2)
+	_ = json.NewEncoder(w).Encode(xcs)
+	// TODO: JSON formatting or the output.
+}
+
 func (s *server) insertOne(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+	// Insert optional latency and/or HTTP error.
 	l := r.URL.Query().Get("latency")
 	if len(l) > 0 {
-		latency(l)
+		s.latency(l)
 	}
 	e := r.URL.Query().Get("error")
 	if len(e) > 0 {
-		c, m := httpError(e)
+		c, m := s.httpError(e)
 		if c != 200 {
 			http.Error(w, m, c)
 			log.Printf("error: " + m)
@@ -174,13 +225,14 @@ func (s *server) insertOne(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) findOne(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+	// Insert optional latency and/or HTTP error.
 	l := r.URL.Query().Get("latency")
 	if len(l) > 0 {
-		latency(l)
+		s.latency(l)
 	}
 	e := r.URL.Query().Get("error")
 	if len(e) > 0 {
-		c, m := httpError(e)
+		c, m := s.httpError(e)
 		if c != 200 {
 			http.Error(w, m, c)
 			log.Printf("error: " + m)
@@ -189,29 +241,26 @@ func (s *server) findOne(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	vars := mux.Vars(r)
-	id, _ := primitive.ObjectIDFromHex(vars["id"])
-	var d Document
-	coll := s.client.Database("observer").Collection("documents")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	err := coll.FindOne(ctx, Document{ID: id}).Decode(&d)
+	id := vars["id"]
+	var b []byte
+	err := s.group.Get(nil, id, groupcache.AllocatingByteSliceSink(&b))
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{ "message": "` + err.Error() + `" }`))
+		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(d)
+	_, _ = w.Write(b)
 }
 
 func (s *server) find(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s request to %s\n", r.Method, r.RequestURI)
+	// Insert optional latency and/or HTTP error.
 	l := r.URL.Query().Get("latency")
 	if len(l) > 0 {
-		latency(l)
+		s.latency(l)
 	}
 	e := r.URL.Query().Get("error")
 	if len(e) > 0 {
-		c, m := httpError(e)
+		c, m := s.httpError(e)
 		if c != 200 {
 			http.Error(w, m, c)
 			log.Printf("error: " + m)
