@@ -24,3 +24,14 @@ metadata:
   namespace: observer
   annotations:
     iam.gke.io/gcp-service-account: cluster-01-observer@kubernetes-333808.iam.gserviceaccount.com
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: observer
+  namespace: observer
+data:
+  db_hostname: observer-db-0.observer-db
+  cache_peers: http://observer-api-0.observer-db:8080,http://observer-api-1.observer-db:8080,http://observer-api-2.observer-db:8080,http://observer-api-3.observer-db:8080,http://observer-api-4.observer-db:8080,http://observer-api-5.observer-db:8080
