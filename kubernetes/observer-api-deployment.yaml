@@ -6,7 +6,7 @@ metadata:
   annotations:
     cloud.google.com/backend-config: '{"ports": {"http":"observer-api"}}'
 spec:
-  clusterIP: None
+  type: ClusterIP
   selector:
     app: observer
     type: api
@@ -31,13 +31,11 @@ spec:
 ---
 
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: observer-api
   namespace: observer
 spec:
-  serviceName: observer-api
-  replicas: 6
   selector:
     matchLabels:
       app: observer
@@ -47,18 +45,15 @@ spec:
       labels:
         app: observer
         type: api
+        language: go
     spec:
       serviceAccountName: observer
-      terminationGracePeriodSeconds: 10
       containers:
         - name: main
-          image: smorenburg/observer:0.3.4
+          image: smorenburg/observer:0.3.0
           env:
             - name: DB_HOSTNAME
-              valueFrom:
-                configMapKeyRef:
-                  name: observer
-                  key: db_hostname
+              value: observer-db-0.observer-db.observer.svc.cluster.local
             - name: DB_USERNAME
               valueFrom:
                 secretKeyRef:
@@ -69,11 +64,6 @@ spec:
                 secretKeyRef:
                   name: observer
                   key: db_password
-            - name: CACHE_PEERS
-              valueFrom:
-                configMapKeyRef:
-                  name: observer
-                  key: cache_peers
           ports:
             - name: default
               containerPort: 8080
@@ -81,21 +71,45 @@ spec:
               containerPort: 9090
           resources:
             requests:
-              cpu: 50m
-              memory: 50Mi
+              cpu: 200m
+              memory: 100Mi
             limits:
-              cpu: 50m
-              memory: 50Mi
+              cpu: 200m
+              memory: 100Mi
           readinessProbe:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
+
+---
+
+apiVersion: autoscaling/v2beta1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: observer-api
+  namespace: observer
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: observer-api
+  minReplicas: 3
+  maxReplicas: 9
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        targetAverageUtilization: 80
+    - type: Resource
+      resource:
+        name: memory
+        targetAverageUtilization: 80
 
 ---
 
